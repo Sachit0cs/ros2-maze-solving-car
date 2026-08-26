@@ -157,6 +157,33 @@ class Knowledge:
         # threshold, gets the intended robustness without the trap.
         return self._vote(a, b, OPEN_VOTE)
 
+    def assert_wall(self, a, b):
+        """A wall the car was physically STOPPED by. Believe it immediately.
+
+        This is not a ray, it is a contact, and it is better evidence than any
+        number of rays: the driver tried to cross this edge, something solid
+        was in the way, and it had to reverse out. Nothing about range,
+        incidence angle or pose lag applies.
+
+        It is also the only evidence available in the case that needs it most.
+        While the car is reversing and turning out of a blockage it is spinning
+        faster than the mapper's yaw gate allows, so every scan of the wall
+        that stopped it is discarded - and without this the planner keeps
+        routing through that wall, the car drives at it again, and the two of
+        them oscillate. Measured, before this existed: a discovery run bounced
+        between (3, 14) and (4, 14) of maze_classic until the episode timed
+        out at 152.3 s.
+
+        Set to the clamp rather than the commit threshold, so it takes a full
+        run of contrary rays to argue away something the car actually hit.
+        """
+        (ac, ar), (bc, br) = a, b
+        if ar == br:
+            self.h_score[ar][min(ac, bc)] = CLAMP
+        else:
+            self.v_score[min(ar, br)][ac] = CLAMP
+        return self._vote(a, b, 0)            # recompute the state, bump revision
+
     def learn_terrain(self, cell, cost):
         c, r = cell
         self.visited[r][c] = True

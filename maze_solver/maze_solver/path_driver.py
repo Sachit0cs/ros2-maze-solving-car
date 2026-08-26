@@ -54,7 +54,7 @@ from nav_msgs.msg import Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 
 from maze_solver.lidar_utils import bearings, clean, sector_mean, sector_min, wrap
 from maze_solver.maze import Maze
@@ -117,6 +117,9 @@ class PathDriver(Node):
 
         self.pub_cmd = self.create_publisher(Twist, 'cmd_vel', 10)
         self.pub_terrain = self.create_publisher(Float32, 'car/terrain', 10)
+        # 'I tried to go that way and something solid stopped me.' The mapper
+        # believes this over any lidar ray - see Knowledge.assert_wall.
+        self.pub_blocked = self.create_publisher(String, 'car/blocked', 10)
         self.create_subscription(Path, 'plan', self.on_plan, 10)
         self.create_subscription(PoseStamped, 'car/world_pose', self.on_pose, 10)
         self.create_subscription(LaserScan, 'scan', self.on_scan, SENSOR_QOS)
@@ -168,6 +171,22 @@ class PathDriver(Node):
             if acc >= self.lookahead:
                 return self.path[i + 1]
         return self.path[-1]
+
+    def report_blocked(self, cell):
+        """Tell the mapper which edge just stopped the car.
+
+        The next cell on the path, not the lookahead point: the lookahead can
+        be two or three cells ahead, and the wall in front of the bumper is on
+        the very next edge.
+        """
+        for px, py in self.path:
+            nxt = self.maze.world_to_cell(px, py)
+            if nxt == cell:
+                continue
+            if abs(nxt[0] - cell[0]) + abs(nxt[1] - cell[1]) == 1:
+                self.pub_blocked.publish(
+                    String(data=json.dumps([list(cell), list(nxt)])))
+            return
 
     # ------------------------------------------------------------------ tick
 
@@ -292,6 +311,7 @@ class PathDriver(Node):
                     self.get_logger().info(
                         'blocked: %.2f m ahead, %d cells of plan left'
                         % (front, len(self.path)))
+                    self.report_blocked(cell)
                 elif self.hold_ticks > self.hold_before_backup:
                     behind = (sector_min(rs, angs, math.pi, 0.35)
                               if self.scan is not None else 0.0)

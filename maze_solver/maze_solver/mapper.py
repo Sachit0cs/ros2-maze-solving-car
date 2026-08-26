@@ -97,6 +97,7 @@ class Mapper(Node):
         self.create_subscription(LaserScan, 'scan', self.on_scan, SENSOR_QOS)
         self.create_subscription(PoseStamped, 'car/world_pose', self.on_pose, 10)
         self.create_subscription(Float32, 'car/terrain', self.on_terrain, 10)
+        self.create_subscription(String, 'car/blocked', self.on_blocked, 10)
         self.create_subscription(Bool, 'episode/active', self.on_active, EPISODE_QOS)
 
         self.pose = None
@@ -132,6 +133,25 @@ class Mapper(Node):
             return
         cell = self.known.cell_of(self.pose[0], self.pose[1])
         self.known.learn_terrain(cell, float(m.data))
+
+    def on_blocked(self, m):
+        """The driver hit something. That is better evidence than any ray."""
+        try:
+            a, b = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        a, b = tuple(a), tuple(b)
+        if b in self.known.geom._grid_neighbours(*a):
+            if self.known.assert_wall(a, b):
+                self.get_logger().info(
+                    'contact: %s -> %s is a wall (the car was stopped by it)'
+                    % (a, b))
+            self.publish_map()
+
+    def publish_map(self):
+        self.last_rev = self.known.revision
+        self.pub_map.publish(String(data=json.dumps(self.known.as_dict())))
+        self.write_map()
 
     def on_active(self, m):
         if m.data and not self.active:
@@ -181,10 +201,8 @@ class Mapper(Node):
 
         now = self.get_clock().now().nanoseconds * 1e-9
         if self.known.revision != self.last_rev and (now - self.last_pub) >= self.min_period:
-            self.last_rev = self.known.revision
             self.last_pub = now
-            self.pub_map.publish(String(data=json.dumps(self.known.as_dict())))
-            self.write_map()
+            self.publish_map()
         if now - self.last_log > 5.0:
             self.last_log = now
             self.get_logger().info(
