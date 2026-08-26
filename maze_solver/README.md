@@ -86,6 +86,7 @@ maze, headless, scored by the episode manager:
 | `tiny` 6×6 | A\* | known | 20.4 s | **21.4 s** | solved |
 | `classic` 15×15 | A\* | known | 116 s | **121.6 s** | solved |
 | `terrain` 15×15 | UCS | known | 204 s | **196.0 s** | solved |
+| `classic` 15×15 | A\* | **discovery** | — | **188.0 s** | solved |
 | `trap` 15×15 | wall-follower | — | never | **never** | as designed |
 
 "Predicted" is `cost × pitch / v_max` — the planner's own number, computed
@@ -106,6 +107,14 @@ be asserting the opposite of the lesson.
 
 Note the wall follower is also *slow* where it does work: on `classic` it walks
 124 cells against A\*'s 68, so it needs well over 500 s where A\* takes 122.
+
+**The discovery row is the one to be pleased about.** Same maze, same algorithm,
+same car — but the planner began knowing nothing except how big the arena was
+and where the goal is, and built the rest from the lidar as it drove. It cost
+**188.0 s against the known-map run's 121.6 s**, a 55 % surcharge for not being
+given the answer, which is roughly what the offline runs predict (they walk
+about 60 cells where 68 would do, and finish having mapped 70–77 % of the maze).
+That gap *is* the value of a map, measured.
 
 ### The one maze that separates them
 

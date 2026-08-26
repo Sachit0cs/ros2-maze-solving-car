@@ -28,17 +28,34 @@ BUDGET=${4:-180}
 EXPECT=${5:-goal}
 if [ "$MAZE" = "trap" ] && [ "$ALGO" = "wall" ]; then EXPECT=stuck; fi
 
+# A LOG FILE OF THIS RUN'S OWN, named after this shell's pid.
+#
+# Redirecting to a fixed "$LOG_DRV" truncates it - but a previous run's
+# process keeps its own file offset, so anything it writes afterwards lands
+# PAST the new run's content and leaves the old bytes in between. The result
+# reads like data: a progress trace that alternated between '96 % at (12, 13)'
+# and '72 % at (9, 6)', one car in two places two hundred cells apart. Several
+# confident, wrong conclusions were drawn from it before the file was checked.
+#
+# A unique name per run cannot do that, whatever else is running.
+LOG_SIM=/tmp/ms_sim_$$.log
+LOG_DRV=/tmp/ms_drv_$$.log
+
+
 MAZES=~/maze_solver_ws/mazes
 WORLD=$MAZES/maze_$MAZE.sdf
 META=$MAZES/maze_$MAZE.json
 
 source "$(dirname "${BASH_SOURCE[0]}")/kill_sim.sh"
+# The logs are deliberately NOT deleted: they are named per run, so they
+# cannot contaminate anything, and they are the first thing you want when
+# a run fails. /tmp clears them soon enough.
 trap kill_sim EXIT
 kill_sim
 
 # REFUSE TO START if anything from a previous run survived.
 #
-# A leftover solver writes to the same /tmp/ms_drv.log this run truncates, and
+# A leftover solver writes to the same "$LOG_DRV" this run truncates, and
 # it holds its own file offset - so the two runs' output interleaves and the
 # result is unreadable in a way that looks like data rather than corruption.
 # The symptom that gave it away: a progress trace alternating between '9 % at
@@ -65,6 +82,7 @@ DRIVER=plan
 [ "$ALGO" = "wall" ] && DRIVER=wall
 
 echo "=== maze_$MAZE : $ALGO, $MODE mode ==="
+echo "  logs: $LOG_SIM  $LOG_DRV"
 python3 - "$META" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -78,7 +96,7 @@ PY
 
 echo "=== launching gazebo headless ==="
 ros2 launch maze_solver maze_sim.launch.py \
-     world:="$WORLD" gui:=false rviz:=false >/tmp/ms_sim.log 2>&1 &
+     world:="$WORLD" gui:=false rviz:=false >"$LOG_SIM" 2>&1 &
 for i in $(seq 60); do
   ros2 topic list 2>/dev/null | grep -q '/scan' && break
   sleep 2
@@ -87,7 +105,7 @@ sleep 6
 
 if ! ros2 topic list 2>/dev/null | grep -q '/scan'; then
   echo "FAIL: /scan never appeared. Last 30 lines of the sim log:"
-  tail -30 /tmp/ms_sim.log
+  tail -30 "$LOG_SIM"
   exit 1
 fi
 N=$(ros2 topic list 2>/dev/null | grep -cxE '/scan|/cmd_vel|/ego/true_odom')
@@ -111,7 +129,7 @@ for T in /clock /scan /ego/true_odom; do
     echo "      The bridge is up; the Gazebo side is not. Usually a stale gz"
     echo "      server from a previous run - check kill_sim, and try again."
     pgrep -af 'maze_solver_ws/mazes' | cut -c1-100
-    tail -20 /tmp/ms_sim.log
+    tail -20 "$LOG_SIM"
     exit 1
   fi
 done
@@ -153,13 +171,13 @@ PY
 echo "=== starting the solver ==="
 ros2 launch maze_solver solve.launch.py meta:="$META" \
      algorithm:="$ALGO" mode:="$MODE" driver:="$DRIVER" \
-     >/tmp/ms_drv.log 2>&1 &
+     >"$LOG_DRV" 2>&1 &
 
 echo "=== watching for up to ${BUDGET}s ==="
 RESULT=timeout
 for i in $(seq "$BUDGET"); do
-  if grep -qE 'episode 1: (goal|wall|stuck)' /tmp/ms_drv.log 2>/dev/null; then
-    RESULT=$(grep -oE 'episode 1: (goal|wall|stuck)' /tmp/ms_drv.log | head -1 \
+  if grep -qE 'episode 1: (goal|wall|stuck)' "$LOG_DRV" 2>/dev/null; then
+    RESULT=$(grep -oE 'episode 1: (goal|wall|stuck)' "$LOG_DRV" | head -1 \
              | awk '{print $3}')
     break
   fi
@@ -169,7 +187,7 @@ done
 echo
 echo "=== what the nodes said ==="
 grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|astar|bfs|dfs|ucs|greedy|bidirectional|replan|progress|episode|blocked|backing out|wall contact|SIM CLOCK|waiting for' \
-     /tmp/ms_drv.log 2>/dev/null | sed 's/.*\]: //' | tail -22
+     "$LOG_DRV" 2>/dev/null | sed 's/.*\]: //' | tail -22
 
 # Did the SIMULATOR survive? A failing run means nothing if gz died underneath
 # it, and gz dying is not a maze_solver bug. It has happened here twice, both
@@ -180,7 +198,7 @@ grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|ast
 if ! pgrep -f 'maze_solver_ws/mazes' >/dev/null 2>&1; then
   echo
   echo "=== the simulator is not running any more ==="
-  grep -E 'process has died|exit code' /tmp/ms_sim.log 2>/dev/null | tail -3
+  grep -E 'process has died|exit code' "$LOG_SIM" 2>/dev/null | tail -3
   echo "  INCONCLUSIVE - gz exited during the run, so the result below is not"
   echo "  a statement about maze_solver. An 'exit code -15' means something"
   echo "  sent it SIGTERM: usually another test run's kill_sim. Run one at a"
@@ -200,7 +218,7 @@ fi
 case "$RESULT" in
   goal)
     echo "  PASS - solved maze_$MAZE with $ALGO in $MODE mode"
-    grep -oE 'episode 1: goal +in +[0-9.]+ s' /tmp/ms_drv.log | head -1
+    grep -oE 'episode 1: goal +in +[0-9.]+ s' "$LOG_DRV" | head -1
     exit 0 ;;
   wall)
     echo "  FAIL - hit a wall. The plan and the world disagree, or the driver"
@@ -212,6 +230,6 @@ case "$RESULT" in
   *)
     echo "  FAIL - nothing finished inside ${BUDGET}s."
     echo "  last 20 lines of the driver log:"
-    tail -20 /tmp/ms_drv.log
+    tail -20 "$LOG_DRV"
     exit 1 ;;
 esac
