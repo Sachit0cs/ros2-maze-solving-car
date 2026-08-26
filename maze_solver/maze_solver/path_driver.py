@@ -73,7 +73,8 @@ class PathDriver(Node):
         self.declare_parameter('align_gate', 0.70)     # rad
         self.declare_parameter('turn_penalty', 0.75)
         self.declare_parameter('lookahead_cells', 0.55)
-        self.declare_parameter('brake_distance', 0.17)
+        self.declare_parameter('brake_distance', 0.20)
+        self.declare_parameter('slow_distance', 0.50)
         self.declare_parameter('v_floor', 0.06)
         # recovery from being blocked - see the comment in tick()
         self.declare_parameter('hold_before_backup', 20)   # ticks at 20 Hz = 1 s
@@ -90,6 +91,7 @@ class PathDriver(Node):
         self.gate = float(g('align_gate').value)
         self.turn_pen = float(g('turn_penalty').value)
         self.brake_d = float(g('brake_distance').value)
+        self.slow_d = float(g('slow_distance').value)
         self.v_floor = float(g('v_floor').value)
         self.hold_before_backup = int(g('hold_before_backup').value)
         self.backup_ticks = int(g('backup_ticks').value)
@@ -205,6 +207,22 @@ class PathDriver(Node):
             v = (self.v_max / max(t, 1.0)) * (1.0 - self.turn_pen
                                               * abs(alpha) / self.gate)
             v = max(self.v_floor, v)
+
+            # Ease off as the wall approaches, rather than running at full
+            # speed into a cliff-edge brake.
+            #
+            # This matters most in DISCOVERY mode, where the planner assumes
+            # unknown edges are open and therefore routes deliberately at walls
+            # it has never seen. The car meets them at v_max. Stopping from
+            # 0.40 m/s under the model's 1.5 m/s^2 takes 53 mm, so a brake that
+            # fires at 0.17 m halts with 117 mm to spare - against an 85 mm
+            # crash threshold. That is not much margin once a corner and some
+            # lidar noise are involved, and it was not enough: a discovery run
+            # was scored 'wall' after 4.6 s.
+            if front is not None and front < self.slow_d:
+                span = max(1e-3, self.slow_d - self.brake_d)
+                v = min(v, self.v_max * max(0.0, front - self.brake_d) / span)
+                v = max(0.0, v)
 
             if front is not None and front < self.brake_d:
                 # Something is close ahead that the plan did not expect. In

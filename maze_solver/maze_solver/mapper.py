@@ -73,11 +73,11 @@ class Mapper(Node):
         # worst at rejecting. Cheaper to throw the scan away: the car turns in
         # place for well under a second and then scans from a standstill.
         #
-        # max_range: 5 cells. Beyond that even a correct 1-degree calibration
-        # error puts a return on the wrong side of a lattice line, and a
-        # corridor five cells long has already been mapped by the near rays.
-        self.declare_parameter('max_yaw_rate', 0.6)
-        self.declare_parameter('max_range_cells', 5.0)
+        # The RANGE and INCIDENCE gates are not here - they live in
+        # Knowledge.integrate, so that the offline test exercises the same code
+        # that ships. This node only decides whether a scan is worth offering
+        # at all.
+        self.declare_parameter('max_yaw_rate', 0.35)
 
         g = self.get_parameter
         meta_path = g('meta_path').value
@@ -85,7 +85,6 @@ class Mapper(Node):
         self.map_file = g('map_file').value
         self.min_period = float(g('min_publish_period').value)
         self.max_yaw_rate = float(g('max_yaw_rate').value)
-        self.max_range_cells = float(g('max_range_cells').value)
 
         if not meta_path or not os.path.exists(meta_path):
             raise SystemExit('mapper needs meta_path=<maze>.json')
@@ -165,7 +164,6 @@ class Mapper(Node):
         rs = clean(msg)
         angs = bearings(msg)
         far = msg.range_max
-        reach = self.max_range_cells * self.known.pitch
 
         c, s = math.cos(yaw), math.sin(yaw)
         ox, oy = x + c * self.lidar_dx, y + s * self.lidar_dx
@@ -173,11 +171,6 @@ class Mapper(Node):
         hits, misses = [], []
         for r, a in zip(rs, angs):
             stopped = r < far - 1e-6
-            if r > reach:
-                # too far to attribute to a lattice line, but the near part of
-                # the ray is still good evidence of open space - so keep it as
-                # a miss, truncated, rather than discarding the whole ray
-                r, stopped = reach, False
             b = yaw + a
             px, py = ox + math.cos(b) * r, oy + math.sin(b) * r
             if stopped:

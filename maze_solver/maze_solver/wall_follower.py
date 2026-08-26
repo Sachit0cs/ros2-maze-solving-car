@@ -12,18 +12,26 @@ graph in one.
 
 THE RULE
 
-Keep your left hand on the wall and walk. Three cases, checked in order,
+Keep your left hand on the wall and walk. FOUR cases, checked in order,
 because the order IS the rule:
 
-  1. blocked ahead        turn right on the spot - the hand stays on the wall
-  2. the wall on the left is gone   turn left and drive into the gap, or the
-                          hand comes off the wall and the rule is broken
-  3. otherwise            hold the left wall at half a corridor
+  1. blocked ahead              turn right on the spot - the hand stays on
+  2. left gone AND diagonal clear   turn left into the gap
+  3. left gone, diagonal not clear  go straight - you are not past the corner
+  4. otherwise                  hold the left wall at half a corridor
 
-Case 2 is the one people get wrong when they write this from memory. The
-tempting version is 'if there is space on the left, keep going straight and
-come back to it' - which walks straight past every left turn in the maze and
-degenerates into a very slow random walk.
+Case 2 is the one people get wrong from memory: the tempting version is 'if
+there is space on the left, keep going straight and come back to it', which
+walks past every left turn and degenerates into a slow random walk.
+
+Case 3 is the one that gets left out entirely, and it is what makes the
+difference between a robot and a crash. Between noticing the opening and being
+far enough forward to turn into it, the corner post is still there. Without
+this branch the code falls through to case 4, whose proportional term sees a
+large `side`, saturates, and commands nearly a radian per second straight into
+that post - undoing the diagonal gate case 2 was careful to apply. Replaying
+this control law against the true geometry offline crashed at t = 2.2 s in cell
+(1, 0) on every maze tried; in Gazebo, at 2.8 s.
 
 WHAT IT CANNOT DO
 
@@ -58,7 +66,7 @@ class WallFollower(Node):
         # way you would tell a real robot the width of the corridors it is
         # about to be put in.
         self.declare_parameter('corridor', 0.62)
-        self.declare_parameter('v_max', 0.32)
+        self.declare_parameter('v_max', 0.28)
         self.declare_parameter('w_max', 2.0)
         self.declare_parameter('k_wall', 3.2)
         self.declare_parameter('front_stop', 0.24)
@@ -111,12 +119,31 @@ class WallFollower(Node):
             cmd.linear.x = 0.0
             cmd.angular.z = -h * self.w_max * 0.8
         elif side > self.lost and diag > self.lost:
-            # 2. the wall fell away: follow it round rather than sail past it
+            # 2. the wall fell away and the diagonal agrees: follow it round
             state = 'opening - turning %s' % ('left' if h > 0 else 'right')
             cmd.linear.x = self.v_max * 0.45
             cmd.angular.z = h * 1.5
+        elif side > self.lost:
+            # 3. THE CASE THAT IS ALWAYS MISSING. The side wedge has fallen
+            # away, so there is an opening - but the diagonal still sees the
+            # corner post at the near edge of it. Turning now corners too
+            # early and clips that post.
+            #
+            # Without this branch the code fell through to case 4, where the
+            # proportional term reads a large `side`, clamps the error to its
+            # maximum, and commands 0.96 rad/s toward the wall - which
+            # completely undermines the diagonal gate that case 2 was careful
+            # to apply. Measured, by replaying this control law against the
+            # true geometry offline: a crash at t = 2.2 s in cell (1, 0), on
+            # every maze tried, always in the 'following' state. In Gazebo the
+            # same thing happened at 2.8 s.
+            #
+            # Go straight until the diagonal is clear too. Then case 2 turns.
+            state = 'past the corner - holding straight'
+            cmd.linear.x = self.v_max * 0.55
+            cmd.angular.z = 0.0
         else:
-            # 3. hold station against the wall
+            # 4. hold station against the wall
             state = 'following'
             err = min(0.30, max(-0.30, side - self.target))
             w = h * self.k_wall * err

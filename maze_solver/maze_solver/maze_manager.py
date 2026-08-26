@@ -20,9 +20,14 @@ cells - see _distance_field for the run that proved cells were wrong. Briefly:
 a cost-optimal route detours around mud, a detour is a retreat when you count
 hops, and a flawless run got scored 'stuck'.
 
-'stuck' therefore means no reduction in cost-to-goal for stuck_seconds. Cells
-are still computed, and still shown, because 'nine cells from the goal' is what
-a human wants to read - but nothing is scored on them.
+Cells are still computed, and still shown, because 'nine cells from the goal'
+is what a human wants to read - but nothing is scored on them.
+
+'stuck' then means neither of the TWO kinds of progress for stuck_seconds:
+getting cheaper (cost-to-goal below its best) or learning something (entering a
+cell never visited this episode). A discovery run makes almost all of its
+progress the second way - it explores away from the goal on purpose - and
+demanding the first alone failed a run that was working perfectly. See tick().
 
 The manager is the one node that is allowed to know the true maze even in
 discovery mode. It is the referee, not a player - it never publishes the field
@@ -100,9 +105,11 @@ class MazeManager(Node):
         self.pos = None
         self.yaw = 0.0
         self.min_range = 99.0
+        self.min_bearing = 0.0
         self.active = False
         self.settle_from = None
         self.best_d = None
+        self.seen = set()
         self.last_progress_t = None
         self.warned_no_odom = False
         self.n_goal = self.n_wall = self.n_stuck = 0
@@ -182,8 +189,21 @@ class MazeManager(Node):
         self.pub_pose.publish(ps)
 
     def on_scan(self, m):
-        v = [r for r in m.ranges if 0.02 < r < 100.0]
-        self.min_range = min(v) if v else 99.0
+        """Nearest return, and the bearing it came from.
+
+        The bearing is kept purely so that a 'wall' verdict can say which way
+        the car was touching something. 'hit a wall' with no direction is a
+        result you cannot act on; 'hit a wall 0.07 m off the left beam' tells
+        you immediately whether the driver clipped a corner or drove head-on
+        into a dead end.
+        """
+        best, bearing = 99.0, 0.0
+        for i, r in enumerate(m.ranges):
+            if 0.02 < r < 100.0 and r < best:
+                best = r
+                bearing = m.angle_min + i * m.angle_increment
+        self.min_range = best
+        self.min_bearing = bearing
 
     def respawn(self, why):
         self.pub_active.publish(Bool(data=False))
@@ -213,6 +233,7 @@ class MazeManager(Node):
         self.pos = None
         self.active = False
         self.best_d = None
+        self.seen = set()
         self.last_progress_t = None
 
     def finish(self, why, t):
@@ -289,6 +310,10 @@ class MazeManager(Node):
             self.finish('goal', t)
             return
         if self.min_range < self.crash_d:
+            self.get_logger().warn(
+                'wall contact: %.3f m at %+.0f deg, in cell %s'
+                % (self.min_range, math.degrees(self.min_bearing),
+                   self.maze.world_to_cell(*self.pos)))
             self.finish('wall', t)
             return
 
@@ -312,11 +337,33 @@ class MazeManager(Node):
         # inside one cell is not making progress no matter how far it drives,
         # and a car reversing out of a dead end is - it is on its way to a
         # lower number. Metres travelled cannot tell those apart.
-        # 'stuck' is no reduction in COST to the goal. A car detouring around
-        # mud is making progress even though it is getting further away in
-        # cells; a car shuffling inside one cell is not, however far it drives.
+        # PROGRESS IS EITHER OF TWO THINGS, and it has to be, because the three
+        # ways of driving this maze make progress differently.
+        #
+        #   getting closer     cost-to-goal fell below its previous best. This
+        #                      is what a known-map run does, continuously.
+        #   learning something the car entered a cell it has never been in. A
+        #                      discovery run spends most of its time exploring
+        #                      AWAY from the goal, and a wall follower rounding
+        #                      a loop does too.
+        #
+        # Requiring the first alone failed a working discovery run: it had
+        # mapped 30 % of a 15x15 maze over 26 replans and driven from (0, 0) to
+        # (0, 14), and its progress reading went 46 %, 41 %, 37 %, 32 % as it
+        # explored. Exactly the behaviour the mode exists to demonstrate,
+        # scored as failure.
+        #
+        # Requiring the second alone would never fire on a car circling a large
+        # loop forever - which is the wall follower's documented failure and has
+        # to be catchable. Either one resets the clock; neither for
+        # stuck_seconds means genuinely stuck.
+        moved_on = cell not in self.seen
+        if moved_on:
+            self.seen.add(cell)
         if self.best_d is None or d < self.best_d - 1e-9:
             self.best_d = d
+            moved_on = True
+        if moved_on:
             self.last_progress_t = t
         elif self.last_progress_t and (t - self.last_progress_t) > self.stuck_t:
             self.finish('stuck', t)

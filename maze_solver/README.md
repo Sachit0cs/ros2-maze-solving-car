@@ -76,6 +76,26 @@ Regenerate all of it, in about two seconds:
 python3 scripts/compare_algos.py
 ```
 
+### And in the simulator
+
+The table above is arithmetic. This is a 160 mm car actually driving out of a
+maze, headless, scored by the episode manager:
+
+| maze | algorithm | mode | predicted | measured | |
+|---|---|---|---|---|---|
+| `tiny` 6×6 | A\* | known | 20.4 s | **21.4 s** | solved |
+| `classic` 15×15 | A\* | known | 116 s | **121.6 s** | solved |
+| `terrain` 15×15 | UCS | known | 204 s | **196.0 s** | solved |
+
+"Predicted" is `cost × pitch / v_max` — the planner's own number, computed
+before the car moved. **The cost model is not a scoring convention, it is a
+prediction of the clock**, and on the maze specifically built to make cost and
+distance disagree it lands within 4 %.
+
+That is also why the `terrain` row is the interesting one. UCS chose the
+80-cell route over the 66-cell route, and the 80-cell route really was faster
+on the stopwatch.
+
 ### The one maze that separates them
 
 `terrain` — 15×15, braided so there is more than one route, with mud on some

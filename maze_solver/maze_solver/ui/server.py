@@ -167,8 +167,10 @@ class Editor:
             if act == 'wall':
                 a, b = tuple(p['a']), tuple(p['b'])
                 if b in m._grid_neighbours(*a):
-                    now = b in m.neighbours(a)
-                    m._open(a[0], a[1], b[0], b[1]) if not now else self._close(m, a, b)
+                    if b in m.neighbours(a):
+                        self._close(m, a, b)
+                    else:
+                        m._open(a[0], a[1], b[0], b[1])
             elif act == 'terrain':
                 c, r = int(p['c']), int(p['r'])
                 tiers = [t[1] for t in TERRAIN]

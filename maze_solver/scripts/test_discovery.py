@@ -136,17 +136,22 @@ def test_single_scan_is_truthful(n):
         m = Maze(cols=9, rows=9, seed=90 + i, braid=0.3)
         boxes = aabbs(m)
         k = Knowledge(m.to_meta())
-        for cell in [m.start, (4, 4), (8, 0)]:
-            x, y = m.cell_centre(*cell)
-            hits, misses = fake_scan(m, boxes, x, y, 0.3, rng=rng)
-            learned += k.integrate((x, y), hits, misses)
+        # TWO passes over the same cells. One vote per edge per scan is the
+        # rule now, and COMMIT is 2, so a single scan deliberately commits
+        # nothing at all - 'two votes' has to mean two independent looks or it
+        # is not evidence, it is one correlated mistake counted twice.
+        for _ in range(2):
+            for cell in [m.start, (4, 4), (8, 0)]:
+                x, y = m.cell_centre(*cell)
+                hits, misses = fake_scan(m, boxes, x, y, 0.3, rng=rng)
+                learned += k.integrate((x, y), hits, misses)
         a, b = audit(m, k)
         fw += a
         fo += b
     check('no passage was ever mistaken for a wall', not fw, fw[:3])
     check('no wall was ever mistaken for a passage', not fo, fo[:3])
-    check('and it actually learned something (%d edge updates)' % learned,
-          learned > 0)
+    check('two looks from the same places commit real edges (%d updates)'
+          % learned, learned > 0)
 
 
 def test_knowledge_hides_the_maze():
@@ -303,6 +308,62 @@ def test_full_discovery_run(n, verbose=False):
           'discovery cannot beat perfect knowledge - if it did, it is cheating')
 
 
+def test_survives_pose_lag(n):
+    """The failure the original offline test could not see.
+
+    Everything here used to fuse each scan with the EXACT pose it was taken
+    from, because that is what a fake lidar naturally gives you. Gazebo does
+    not: the pose is up to a frame old, and the car is turning while it scans.
+    At 2 rad/s, 33 ms is 3.4 degrees, and 3.4 degrees at a 5 m sight line puts
+    a return 0.30 m sideways - most of the way to the next lattice line.
+
+    The consequence was severe and invisible to this file: the car sealed
+    itself into a 40-cell pocket of maze_classic, A* expanded those 40 nodes
+    and reported no path, and the episode timed out. Meanwhile this test passed
+    over thousands of scans, because it was measuring a system without the
+    error in it.
+
+    So the error goes in. Each scan is integrated against a pose that is wrong
+    by a bearing offset, the way a real one is, and the two properties that
+    matter are asserted against the truth regardless.
+    """
+    print('\nfalse walls do not survive a stale pose (the Gazebo failure)')
+    rng = random.Random(21)
+    fw, fo = [], []
+    for i in range(n):
+        m = Maze(cols=12, rows=12, seed=600 + i, braid=0.3)
+        boxes = aabbs(m)
+        k = Knowledge(m.to_meta())
+        at, prev = m.start, None
+        for _ in range(70):
+            x, y = m.cell_centre(*at)
+            true_yaw = rng.uniform(-math.pi, math.pi)
+            # the scan is taken at true_yaw; the pose we fuse it with is a
+            # frame stale, so it is off by up to +/- 4 degrees
+            lag = rng.uniform(-0.07, 0.07)
+            hits, misses = fake_scan(m, boxes, x, y, true_yaw, rng=rng)
+            hits = [_rotate(p, (x, y), lag) for p in hits]
+            misses = [_rotate(p[:2], (x, y), lag) + (p[2],) for p in misses]
+            k.integrate((x, y), hits, misses)
+            a, b = audit(m, k)
+            fw += a
+            fo += b
+            nb = m.neighbours(at)
+            fwd = [c for c in nb if c != prev] or nb
+            prev, at = at, rng.choice(fwd)
+    check('no passage mistaken for a wall, with a stale pose on every scan',
+          not fw, fw[:4])
+    check('no wall mistaken for a passage, with a stale pose on every scan',
+          not fo, fo[:4])
+
+
+def _rotate(p, about, ang):
+    """Rotate a point about another - simulates fusing with a stale heading."""
+    c, s = math.cos(ang), math.sin(ang)
+    dx, dy = p[0] - about[0], p[1] - about[1]
+    return (about[0] + dx * c - dy * s, about[1] + dx * s + dy * c)
+
+
 def test_coverage_grows():
     print('\nmapping progresses rather than plateauing')
     m = Maze(cols=12, rows=12, seed=77, braid=0.2)
@@ -362,6 +423,7 @@ def main():
     test_optimism()
     test_evidence()
     test_single_scan_is_truthful(a.mazes)
+    test_survives_pose_lag(min(a.mazes, 6))
     test_coverage_grows()
     test_search_is_unmodified()
     test_full_discovery_run(a.mazes, a.verbose)

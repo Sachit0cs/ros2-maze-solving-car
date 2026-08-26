@@ -166,15 +166,31 @@ class Knowledge:
             return True
         return False
 
-    def edge_between(self, px, py, tol=None):
+    def edge_between(self, px, py, tol=None, ray=None, min_incidence=0.5):
         """Which lattice edge a world point sits on, or None.
 
-        The lattice lines are at integer cell coordinates. A point is on a
-        vertical wall if its u coordinate is near an integer, on a horizontal
-        wall if its v is. A corner post is near BOTH, and is deliberately
-        returned as None: a return off a corner cannot be attributed to one
-        wall or the other, and guessing marks a wall that may not exist, in a
-        map the planner is about to trust.
+        `ray` is the direction the return came in on, and passing it is what
+        makes this robust to a stale pose. A bearing error displaces a return
+        PERPENDICULAR TO THE RAY, so what it does to the attribution depends
+        entirely on the angle the ray met the wall at:
+
+          hit square-on   the error slides the point ALONG the wall face. It is
+                          still on the same lattice line. Harmless.
+          grazing         the error slides the point ACROSS lattice lines, and
+                          the attribution is confidently wrong.
+
+        So a grazing return is discarded. min_incidence is |cos| of the angle
+        between the ray and the wall's normal: 0.5 rejects anything striking
+        within 30 degrees of parallel. Those rays carry almost no information
+        about which wall they hit anyway - they are the ones running down a
+        corridor - and the square-on rays in the same scan carry all of it.
+
+        The lattice lines are at integer cell coordinates: a point is on a
+        vertical wall if its u is near an integer, on a horizontal wall if its
+        v is. A corner post is near BOTH and is deliberately returned as None -
+        a return off a corner cannot be attributed to one wall or the other,
+        and guessing marks a wall that may not exist in a map the planner is
+        about to trust.
         """
         if tol is None:
             # half the wall, plus a few sigma of lidar noise
@@ -187,11 +203,17 @@ class Knowledge:
         if near_u == near_v:
             return None                       # neither, or a corner post
         if near_u:
+            # a vertical wall: its normal is the x axis
+            if ray is not None and abs(ray[0]) < min_incidence:
+                return None                   # grazing - see the docstring
             c = int(round(u))
             r = int(v // 1)
             if not (0 < c < self.cols and 0 <= r < self.rows):
                 return None                   # outer boundary: nothing to learn
             return ((c - 1, r), (c, r))
+        # a horizontal wall: its normal is the y axis
+        if ray is not None and abs(ray[1]) < min_incidence:
+            return None
         c = int(u // 1)
         r = int(round(v))
         if not (0 <= c < self.cols and 0 < r < self.rows):
@@ -201,7 +223,8 @@ class Knowledge:
     def cell_of(self, px, py):
         return self.geom.world_to_cell(px, py)
 
-    def integrate(self, origin, hits, misses, wall_margin=0.02, step=0.05):
+    def integrate(self, origin, hits, misses, wall_margin=0.02, step=0.05,
+                  max_cells=3.0, min_incidence=0.5):
         """Fold one scan in. Returns how many edges changed state.
 
         Two passes, because a scan carries two different pieces of information
@@ -219,22 +242,58 @@ class Knowledge:
         of that box belongs to the next cell, so the walk sees a cell
         transition and cheerfully marks the wall it just hit as an open
         passage.
+
+        THE RANGE GATE AND THE INCIDENCE GATE LIVE HERE, not in the ROS node.
+
+        Both exist because the pose a scan is fused with can be a frame stale,
+        which displaces every return PERPENDICULAR TO ITS RAY by range times
+        the heading error. Two consequences, and each needs its own guard:
+
+          max_cells       the displacement grows with range. At 4 degrees of
+                          error a 6 m return moves 0.42 m - more than half a
+                          cell, so it is attributed to the wrong lattice line
+                          with total confidence. Three cells is 2 m, which is
+                          14 cm at the same error: inside the tolerance.
+          min_incidence   a ray striking a wall square-on slides ALONG it and
+                          stays on the same line; a grazing ray slides ACROSS
+                          lines. Grazing observations are discarded in both
+                          passes - a hit is not attributed, and a crossing does
+                          not count as evidence of open space.
+
+        They were originally parameters of the mapper node instead, which meant
+        the offline test called integrate() directly and never exercised them -
+        so the test passed while Gazebo sealed the car into a 40-cell pocket.
+        Putting them here makes the thing under test the thing that ships.
         """
         changed = 0
         ox, oy = origin
+        reach = max_cells * self.pitch
+        wall_edges, open_edges = set(), set()
+
         for hx, hy in hits:
-            e = self.edge_between(hx, hy)
-            if e and self.learn_wall(*e):
-                changed += 1
+            dx, dy = hx - ox, hy - oy
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < 1e-6 or d > reach:
+                continue                      # too far to attribute reliably
+            e = self.edge_between(hx, hy, ray=(dx / d, dy / d),
+                                  min_incidence=min_incidence)
+            if e:
+                wall_edges.add(e)
+
         for ex, ey, stop_short in misses:
             dx, dy = ex - ox, ey - oy
             d = (dx * dx + dy * dy) ** 0.5
             if d < 1e-6:
                 continue
+            ux, uy = dx / d, dy / d
             if stop_short:
                 back = min(d, self.wall_thickness / 2.0 + wall_margin)
-                ex, ey = ex - dx / d * back, ey - dy / d * back
                 d -= back
+            if d > reach:
+                d = reach                     # the near part is still good
+            if d <= 0:
+                continue
+            ex, ey = ox + ux * d, oy + uy * d
             n = max(1, int(d / step))
             prev = self.cell_of(ox, oy)
             for i in range(1, n + 1):
@@ -243,9 +302,55 @@ class Knowledge:
                 cur = self.cell_of(px, py)
                 if cur != prev:
                     if abs(cur[0] - prev[0]) + abs(cur[1] - prev[1]) == 1:
-                        if self.learn_open(prev, cur):
-                            changed += 1
+                        # the same incidence test as for a hit: a grazing ray
+                        # slipping past a corner post is not evidence that the
+                        # passage beside it is open
+                        normal = abs(ux) if cur[0] != prev[0] else abs(uy)
+                        # ... and it must cross near the MIDDLE of the passage.
+                        # A stale pose swings the far end of a ray sideways, and
+                        # the place that does damage is a corner post: a ray
+                        # that should have stopped against one clips past its
+                        # tip instead and reports the passage beyond it open.
+                        # Insisting the crossing is at least a quarter of a cell
+                        # from either post removes exactly that case and costs
+                        # only the outermost slivers of each passage, which the
+                        # next scan sees down the middle anyway.
+                        if cur[0] != prev[0]:
+                            along = py / self.pitch + self.rows / 2.0
+                        else:
+                            along = px / self.pitch + self.cols / 2.0
+                        off_post = abs(along - round(along))
+                        if normal >= min_incidence and off_post >= 0.25:
+                            a, b = (prev, cur) if prev < cur else (cur, prev)
+                            open_edges.add((a, b))
                     prev = cur
+
+        # ONE VOTE PER EDGE PER SCAN, and this is the whole point of the
+        # accumulator.
+        #
+        # The first version voted per RAY, which quietly defeated it. Errors
+        # inside a single scan are CORRELATED - the pose is one pose, so if it
+        # is stale then every ray is wrong the same way, and twenty adjacent
+        # rays land on the same wrong lattice line together. That is +20 on one
+        # edge from one bad instant: past the commit threshold, into the clamp,
+        # and effectively permanent. Measured consequence, in Gazebo: the car
+        # sealed itself into a 40-cell pocket of maze_classic and A* expanded
+        # those 40 nodes and reported no path until the episode timed out.
+        #
+        # Counting once per scan makes 'two votes' mean two independent looks,
+        # taken from different places at different times, which is the thing
+        # the threshold was always supposed to be measuring.
+        #
+        # An edge that is both hit and crossed in the same scan gets no vote at
+        # all. That happens on a grazing ray along a wall face, and it is
+        # genuinely ambiguous - the conservative reading is to wait for a look
+        # that is not.
+        for e in wall_edges - open_edges:
+            if self.learn_wall(*e):
+                changed += 1
+        for e in open_edges - wall_edges:
+            if self.learn_open(*e):
+                changed += 1
         return changed
 
     # ------------------------------------------------------------ reporting
