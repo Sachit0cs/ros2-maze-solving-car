@@ -86,8 +86,21 @@ def launch_setup(context, *args, **kwargs):
             launch_arguments={'gz_args': '-r -s -v1 ' + world}.items(),
             condition=UnlessCondition(gui)),
 
+        # Every support node gets a maze_ prefixed NAME, and that is not
+        # cosmetic - it is how scripts/kill_sim.sh finds them.
+        #
+        # ros_gz_bridge, robot_state_publisher and rviz2 are shared executables:
+        # road_follower and traffic_dodger run the very same binaries on this
+        # machine, so teardown cannot match on the process name without killing
+        # their simulations too. When kill_sim was scoped to stop doing that, it
+        # stopped killing these at all - and they accumulated. Measured, after a
+        # morning of test runs: ONE maze_manager, ONE path_driver, ONE planner,
+        # and THIRTEEN ros_gz_bridge nodes, every one of them still bridging
+        # gz topics into this graph. The renaming puts `__node:=maze_bridge`
+        # into the process command line, which is unique to this project and
+        # safe to pkill.
         Node(package='robot_state_publisher', executable='robot_state_publisher',
-             output='screen',
+             name='maze_rsp', output='screen',
              parameters=[{'robot_description': robot_description,
                           'use_sim_time': True}]),
 
@@ -103,16 +116,17 @@ def launch_setup(context, *args, **kwargs):
         #
         # None of that looked like a spawn height. It looked like a controller
         # bug, and then like a planner bug.
-        Node(package='ros_gz_sim', executable='create', output='screen',
+        Node(package='ros_gz_sim', executable='create', name='maze_spawn',
+             output='screen',
              arguments=['-topic', 'robot_description', '-name', 'maze_car',
                         '-x', x0, '-y', y0, '-z', '0.005', '-Y', yaw0]),
 
         Node(package='ros_gz_bridge', executable='parameter_bridge',
-             output='screen', arguments=bridge_args,
+             name='maze_bridge', output='screen', arguments=bridge_args,
              parameters=[{'use_sim_time': True}]),
 
-        Node(package='rviz2', executable='rviz2', output='screen',
-             condition=IfCondition(rviz),
+        Node(package='rviz2', executable='rviz2', name='maze_rviz',
+             output='screen', condition=IfCondition(rviz),
              arguments=['-d', os.path.join(pkg, 'config', 'maze.rviz')],
              parameters=[{'use_sim_time': True}]),
     ]

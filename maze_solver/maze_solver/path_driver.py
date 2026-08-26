@@ -73,8 +73,22 @@ class PathDriver(Node):
         self.declare_parameter('align_gate', 0.70)     # rad
         self.declare_parameter('turn_penalty', 0.75)
         self.declare_parameter('lookahead_cells', 0.55)
-        self.declare_parameter('brake_distance', 0.20)
-        self.declare_parameter('slow_distance', 0.50)
+        # 0.14 m, and this number is tightly constrained from both sides.
+        #
+        # Too small and the car nudges a wall before it stops - the episode
+        # manager calls contact at 0.085 m from the lidar. Too LARGE and it
+        # cannot corner at all: a 0.62 m corridor means the wall it is about to
+        # turn along sits about 0.2 m ahead while it lines the turn up, so a
+        # brake at 0.20 m fires exactly when the car needs to creep forward.
+        # Measured at 0.20: maze_tiny and maze_classic both cycled 'blocked:
+        # 0.17 m ahead' indefinitely and timed out, having solved in 21.4 s and
+        # 121.6 s at 0.17.
+        #
+        # It can sit this close to the wall only because of slow_distance
+        # below: the car is already down to roughly 0.05 m/s by the time it
+        # gets there, so the brake is a formality rather than an emergency.
+        self.declare_parameter('brake_distance', 0.14)
+        self.declare_parameter('slow_distance', 0.45)
         self.declare_parameter('v_floor', 0.06)
         # recovery from being blocked - see the comment in tick()
         self.declare_parameter('hold_before_backup', 20)   # ticks at 20 Hz = 1 s

@@ -54,13 +54,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WS = os.path.expanduser('~/maze_solver_ws')
 MAZES = os.path.join(WS, 'mazes')
 
-# ROS_DOMAIN_ID=42 is not decoration - see scripts/env.sh. Without it a
-# traffic_dodger node left running in another terminal publishes
-# /episode/active on the same graph and this project's planner treats it as an
-# episode restart.
+# ROS_DOMAIN_ID and GZ_PARTITION are both required, and they isolate different
+# buses - see scripts/env.sh for the full story. Briefly: the domain id keeps
+# another project's ROS nodes out of this graph, and the partition keeps
+# another project's GAZEBO server from putting a second /clock on the same gz
+# transport, which reads here as sim time running backwards.
 SETUP = ('source /opt/ros/jazzy/setup.bash && '
          'source %s/install/setup.bash && '
          'export ROS_DOMAIN_ID=42 && '
+         'export GZ_PARTITION=maze_solver && '
          'export LIBGL_ALWAYS_SOFTWARE=1 && ' % WS)
 
 LOG_SIM = '/tmp/ms_ui_sim.log'

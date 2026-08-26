@@ -23,9 +23,20 @@
 #
 # So: signal, then POLL until nothing matches, then escalate to SIGKILL.
 kill_sim() {
+  # '__node:=maze_' is the one that matters most. ros_gz_bridge,
+  # robot_state_publisher and rviz2 are shared executables - the other projects
+  # run the same binaries - so they cannot be matched on process name without
+  # killing those too. maze_sim.launch.py names them maze_bridge / maze_rsp /
+  # maze_rviz, which puts a unique string in their argv.
+  #
+  # Leaving this out is not a small leak. After a morning of runs there were
+  # thirteen surviving ros_gz_bridge processes, all still bridging gz topics
+  # into this project's ROS graph, and the car's reported pose alternated
+  # between two cells because several of them were publishing it.
   local pats=('ros2 launch maze_solver'
               'install/maze_solver/lib/maze_solver'
-              'maze_solver_ws/mazes')
+              'maze_solver_ws/mazes'
+              '__node:=maze_')
 
   # the launch trees first: ros2 launch shuts its own children down cleanly
   pkill -f "${pats[0]}" >/dev/null 2>&1
