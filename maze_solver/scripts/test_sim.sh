@@ -36,6 +36,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/kill_sim.sh"
 trap kill_sim EXIT
 kill_sim
 
+# REFUSE TO START if anything from a previous run survived.
+#
+# A leftover solver writes to the same /tmp/ms_drv.log this run truncates, and
+# it holds its own file offset - so the two runs' output interleaves and the
+# result is unreadable in a way that looks like data rather than corruption.
+# The symptom that gave it away: a progress trace alternating between '9 % at
+# (3, 1)' and '72 % at (11, 8)', which is one car in two places. Everything
+# read out of that log before it was noticed was worthless.
+#
+# Better to stop with an explanation than to produce a plausible wrong answer.
+LEFTOVER=$(pgrep -cf 'install/maze_solver/lib/maze_solver')
+if [ "$LEFTOVER" -gt 0 ]; then
+  echo "FAIL: $LEFTOVER maze_solver node(s) survived kill_sim. Another test run"
+  echo "      is probably still going. Run one at a time - a leftover solver"
+  echo "      writes into the same log this one reads, and the two interleave."
+  pgrep -af 'install/maze_solver/lib/maze_solver' | cut -c1-100
+  exit 1
+fi
+
 if [ ! -f "$WORLD" ]; then
   echo "no maze called '$MAZE' - generating the teaching set first"
   python3 -m maze_solver.make_mazes --out "$MAZES" >/dev/null
