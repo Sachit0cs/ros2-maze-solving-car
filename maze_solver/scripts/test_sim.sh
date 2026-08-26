@@ -149,7 +149,7 @@ done
 
 echo
 echo "=== what the nodes said ==="
-grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|astar|bfs|dfs|ucs|greedy|bidirectional|replan|progress|episode|holding' \
+grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|astar|bfs|dfs|ucs|greedy|bidirectional|replan|progress|episode|blocked|backing out|wall contact|SIM CLOCK|waiting for' \
      /tmp/ms_drv.log 2>/dev/null | sed 's/.*\]: //' | tail -22
 
 echo

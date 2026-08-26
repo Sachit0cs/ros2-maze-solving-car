@@ -81,6 +81,11 @@ class PathDriver(Node):
         self.declare_parameter('backup_ticks', 25)
         self.declare_parameter('v_reverse', 0.12)
         self.declare_parameter('reverse_clearance', 0.22)
+        # Half the diagonal of a 160 x 110 mm chassis: the radius its corners
+        # sweep when it turns on the spot. Plus a margin, this is how much room
+        # it needs beside it before spinning is safe.
+        self.declare_parameter('corner_radius', 0.097)
+        self.declare_parameter('side_margin', 0.055)
 
         g = self.get_parameter
         meta_path = g('meta_path').value
@@ -97,6 +102,8 @@ class PathDriver(Node):
         self.backup_ticks = int(g('backup_ticks').value)
         self.v_reverse = float(g('v_reverse').value)
         self.reverse_clearance = float(g('reverse_clearance').value)
+        self.corner_radius = float(g('corner_radius').value)
+        self.side_margin = float(g('side_margin').value)
 
         if not meta_path or not os.path.exists(meta_path):
             raise SystemExit('path_driver needs meta_path=<maze>.json')
@@ -191,9 +198,38 @@ class PathDriver(Node):
             right = sector_mean(rs, angs, -math.pi / 2.0, 0.42)
             front = sector_min(rs, angs, 0.0, 0.35)
 
+        # How close is the nearest thing on each side? This is a SAFETY
+        # question, so it is the minimum and not the mean - unlike the centring
+        # term above, which wants the mean precisely because one ray clipping a
+        # corner post should not kick the steering.
+        near_l = near_r = None
+        if rs:
+            near_l = sector_min(rs, angs, math.pi / 2.0, 1.0)
+            near_r = sector_min(rs, angs, -math.pi / 2.0, 1.0)
+
         cmd = Twist()
         if abs(alpha) > self.gate:
-            # too far off to drive: rotate on the spot
+            # Too far off to drive: rotate on the spot.
+            #
+            # But check there is room to rotate first. This car is 160 x 110 mm,
+            # so its corner sweeps a 97 mm radius - in a 620 mm corridor that
+            # leaves 213 mm if it is perfectly centred, and much less if it is
+            # not. Spinning while pressed against one wall walks a corner into
+            # it. Measured: a discovery run scored 'wall' at 48.3 s having
+            # driven perfectly well for fifteen replans up to that point.
+            #
+            # So if one side is tight, ease away from it before turning.
+            room = self.corner_radius + self.side_margin
+            if near_l is not None and near_l < room and near_r > near_l:
+                cmd.linear.x = -self.v_reverse * 0.5
+                cmd.angular.z = -1.0
+                self.pub_cmd.publish(cmd)
+                return
+            if near_r is not None and near_r < room and near_l > near_r:
+                cmd.linear.x = -self.v_reverse * 0.5
+                cmd.angular.z = 1.0
+                self.pub_cmd.publish(cmd)
+                return
             cmd.angular.z = max(-self.w_max, min(self.w_max, 3.0 * alpha))
             cmd.linear.x = 0.0
         else:
@@ -202,6 +238,14 @@ class PathDriver(Node):
             if (left is not None and right is not None
                     and left < self.side_gate and right < self.side_gate):
                 w += self.k_centre * (left - right)
+            # a hard push away from a side that is genuinely close, on top of
+            # the soft centring term - this one is not gated on being in a
+            # corridor, because a wall 0.12 m away matters wherever it is
+            room = self.corner_radius + self.side_margin
+            if near_l is not None and near_l < room:
+                w -= self.k_centre * 2.0 * (room - near_l)
+            if near_r is not None and near_r < room:
+                w += self.k_centre * 2.0 * (room - near_r)
             w = max(-self.w_max, min(self.w_max, w))
 
             v = (self.v_max / max(t, 1.0)) * (1.0 - self.turn_pen

@@ -29,7 +29,6 @@ no algorithm can accidentally see the terrain as an obstacle.
 """
 import argparse
 import json
-import math
 import os
 
 from maze_solver.maze import DEFAULTS, TERRAIN, TERRAIN_COST, Maze

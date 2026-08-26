@@ -308,11 +308,12 @@ class Sim:
         try:
             with open(LOG_DRV, errors='replace') as f:
                 txt = f.read()
-            keep = [l for l in txt.splitlines()
-                    if re.search(r'episode|progress|replan|planner up|mapper up|'
-                                 r'path_driver up|wall_follower up|holding|'
-                                 r'scans,|no path', l)]
-            st['lines'] = [clean(l) for l in keep[-16:]]
+            wanted = re.compile(r'episode|progress|replan|planner up|mapper up|'
+                                r'path_driver up|wall_follower up|blocked|'
+                                r'backing out|scans|no path|SIM CLOCK|'
+                                r'wall contact')
+            keep = [ln for ln in txt.splitlines() if wanted.search(ln)]
+            st['lines'] = [clean(ln) for ln in keep[-16:]]
         except FileNotFoundError:
             pass
         total = st['goal'] + st['wall'] + st['stuck']
