@@ -23,11 +23,18 @@ hops, and a flawless run got scored 'stuck'.
 Cells are still computed, and still shown, because 'nine cells from the goal'
 is what a human wants to read - but nothing is scored on them.
 
-'stuck' then means neither of the TWO kinds of progress for stuck_seconds:
-getting cheaper (cost-to-goal below its best) or learning something (entering a
-cell never visited this episode). A discovery run makes almost all of its
-progress the second way - it explores away from the goal on purpose - and
-demanding the first alone failed a run that was working perfectly. See tick().
+'stuck' then means none of the THREE kinds of progress for stuck_seconds:
+
+  getting closer   cost-to-goal below its previous best
+  getting somewhere new   a cell not visited this episode
+  getting wiser    the mapper's revision counter moved
+
+A known-map run makes progress the first way, continuously. A discovery run
+makes almost all of its progress the other two - it explores away from the goal
+on purpose, and it will spend a minute backtracking through cells it has
+already seen to reach an unexplored frontier. Each of the three was added
+because demanding only the ones before it failed a run that was working
+perfectly. See tick().
 
 The manager is the one node that is allowed to know the true maze even in
 discovery mode. It is the referee, not a player - it never publishes the field
@@ -102,6 +109,11 @@ class MazeManager(Node):
         self.pub_pose = self.create_publisher(PoseStamped, 'car/world_pose', 10)
         self.create_subscription(Odometry, 'ego/true_odom', self.on_odom, 10)
         self.create_subscription(LaserScan, 'scan', self.on_scan, SENSOR_QOS)
+        # Optional, and only ever published in discovery mode. The manager does
+        # not use the map - it is the referee and already knows the true maze -
+        # it reads one integer out of it: has the car LEARNED anything lately.
+        # See tick() for why that counts as progress.
+        self.create_subscription(String, 'maze/known', self.on_known, 5)
         self.create_timer(0.2, self.tick)
         # A WALL-CLOCK watchdog, deliberately on a different clock from
         # everything else in this node.
@@ -128,6 +140,8 @@ class MazeManager(Node):
         self.settle_from = None
         self.best_d = None
         self.seen = set()
+        self.map_revision = 0
+        self.best_revision = 0
         self.last_progress_t = None
         self.warned_no_odom = False
         self.n_goal = self.n_wall = self.n_stuck = 0
@@ -224,6 +238,13 @@ class MazeManager(Node):
         ps.pose.orientation.w = math.cos(self.yaw / 2.0)
         self.pub_pose.publish(ps)
 
+    def on_known(self, m):
+        """Just the revision counter out of the mapper's map."""
+        try:
+            self.map_revision = int(json.loads(m.data).get('revision', 0))
+        except (ValueError, TypeError):
+            pass
+
     def on_scan(self, m):
         """Nearest return, and the bearing it came from.
 
@@ -270,6 +291,7 @@ class MazeManager(Node):
         self.active = False
         self.best_d = None
         self.seen = set()
+        self.best_revision = self.map_revision
         self.last_progress_t = None
 
     def finish(self, why, t):
@@ -398,6 +420,19 @@ class MazeManager(Node):
             self.seen.add(cell)
         if self.best_d is None or d < self.best_d - 1e-9:
             self.best_d = d
+            moved_on = True
+        # ...and a THIRD kind of progress: the map got better.
+        #
+        # A discovery car will happily spend a minute backtracking through
+        # cells it has already visited in order to reach an unexplored
+        # frontier. That is neither cheaper nor new, and the first two tests
+        # both read it as stalling: a run was scored 'stuck' at 146.9 s in the
+        # middle of a deliberate 37-cell backtrack, having mapped 32 % of the
+        # maze over 33 replans. Learning something is unambiguously useful
+        # work, whatever direction the car happens to be pointing while it
+        # does it, so it resets the clock too.
+        if self.map_revision > self.best_revision:
+            self.best_revision = self.map_revision
             moved_on = True
         if moved_on:
             self.last_progress_t = t
