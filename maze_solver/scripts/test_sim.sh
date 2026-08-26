@@ -152,6 +152,23 @@ echo "=== what the nodes said ==="
 grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|astar|bfs|dfs|ucs|greedy|bidirectional|replan|progress|episode|blocked|backing out|wall contact|SIM CLOCK|waiting for' \
      /tmp/ms_drv.log 2>/dev/null | sed 's/.*\]: //' | tail -22
 
+# Did the SIMULATOR survive? A failing run means nothing if gz died underneath
+# it, and gz dying is not a maze_solver bug. It has happened here twice, both
+# times because two test batches overlapped and one batch's kill_sim tore down
+# the other batch's world - the log shows 'exit code -15', a SIGTERM, not a
+# crash. Distinguishing the two is the difference between debugging the project
+# and debugging the harness.
+if ! pgrep -f 'maze_solver_ws/mazes' >/dev/null 2>&1; then
+  echo
+  echo "=== the simulator is not running any more ==="
+  grep -E 'process has died|exit code' /tmp/ms_sim.log 2>/dev/null | tail -3
+  echo "  INCONCLUSIVE - gz exited during the run, so the result below is not"
+  echo "  a statement about maze_solver. An 'exit code -15' means something"
+  echo "  sent it SIGTERM: usually another test run's kill_sim. Run one at a"
+  echo "  time, and re-run this."
+  exit 2
+fi
+
 echo
 echo "=== result ==="
 if [ "$RESULT" = "$EXPECT" ] && [ "$EXPECT" != "goal" ]; then
