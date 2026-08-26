@@ -6,7 +6,7 @@ Publishes:
   /episode/active  Bool          False for a moment after a respawn
   /episode/event   String        goal | wall | stuck
 
-PROGRESS IS MEASURED IN CELLS, NOT METRES
+PROGRESS IS MEASURED IN COST, NOT METRES AND NOT CELLS
 
 The road projects measured progress as straight-line distance to the goal,
 which on a road is very nearly arc length along it. In a maze it is nearly
@@ -14,15 +14,21 @@ meaningless: the goal can be two metres away through a wall and forty cells
 away by road, so a car making excellent progress reads as making none, and a
 car that has blundered into the cell next to the goal reads as nearly finished.
 
-So this builds a distance field once - a breadth-first flood from the goal over
-the TRUE maze - and progress is how far down that field the car has come. It is
-exact, it costs one flood fill at startup, and it makes 'stuck' mean what it
-says: no reduction in cells-to-goal for stuck_seconds.
+So this builds a distance field once, from the goal over the TRUE maze, and
+progress is how far down that field the car has come. The field holds COST, not
+cells - see _distance_field for the run that proved cells were wrong. Briefly:
+a cost-optimal route detours around mud, a detour is a retreat when you count
+hops, and a flawless run got scored 'stuck'.
+
+'stuck' therefore means no reduction in cost-to-goal for stuck_seconds. Cells
+are still computed, and still shown, because 'nine cells from the goal' is what
+a human wants to read - but nothing is scored on them.
 
 The manager is the one node that is allowed to know the true maze even in
 discovery mode. It is the referee, not a player - it never publishes the field
 and nothing that drives subscribes to it.
 """
+import heapq
 import json
 import math
 import os
@@ -54,7 +60,7 @@ class MazeManager(Node):
         # sensor's own 60 mm minimum. There is no threshold that sees the
         # instant of contact; this one fires just before it.
         self.declare_parameter('crash_distance', 0.085)
-        self.declare_parameter('stuck_seconds', 20.0)
+        self.declare_parameter('stuck_seconds', 30.0)
         self.declare_parameter('settle_seconds', 1.5)
         self.declare_parameter('max_episodes', 0)     # 0 = unlimited
 
@@ -78,8 +84,10 @@ class MazeManager(Node):
         self.goal_xy = meta['goal_pose']
         self.goal_r = float(meta['goal_radius'])
 
-        self.field = self._distance_field()
-        self.d_start = self.field.get(self.maze.start, 1)
+        self.field = self._distance_field()          # cost, for scoring
+        self.hops = self._hop_field()                # cells, for the display
+        self.d_start = self.field.get(self.maze.start, 1.0)
+        self.hop_start = self.hops.get(self.maze.start, 1)
 
         self.pub_active = self.create_publisher(Bool, 'episode/active', EPISODE_QOS)
         self.pub_event = self.create_publisher(String, 'episode/event', EPISODE_QOS)
@@ -104,13 +112,48 @@ class MazeManager(Node):
         self.finish_times = []
 
         self.get_logger().info(
-            'maze_manager: %dx%d maze, start %s -> goal %s, %d cells apart'
+            'maze_manager: %dx%d maze, start %s -> goal %s, %d cells and '
+            '%.0f cell-times apart'
             % (self.maze.cols, self.maze.rows, self.maze.start, self.maze.goal,
-               self.d_start))
+               self.hop_start, self.d_start))
         self.respawn('init')
 
     def _distance_field(self):
-        """Fewest cells from every cell to the goal. One flood, at startup."""
+        """Least COST from every cell to the goal. One Dijkstra, at startup.
+
+        This used to be a breadth-first flood counting CELLS, and that was
+        wrong in a way that matters more here than almost anywhere else: it
+        made the referee assume that shortest is best, which is the assumption
+        this entire project exists to refute.
+
+        The failure was clean. Uniform-cost search on maze_terrain returns an
+        80-cell route that detours around the mud, in preference to the 66-cell
+        route through it. The car drove that detour perfectly, and its
+        cells-to-goal went 66, 64, 62, 61, 58, then 60, 61, 62 - because a
+        detour is, in hops, a retreat. The manager watched the number stop
+        improving and scored a flawless run as 'stuck' after 45.8 s.
+
+        Cost-to-goal does not have that problem: a car following a cost-optimal
+        route reduces it by exactly the cost of every step it takes. And it is
+        still planner-independent, which the alternative - progress along the
+        published path - would not have been, because the wall follower has no
+        published path and still has to be scored.
+        """
+        d = {self.maze.goal: 0.0}
+        pq = [(0.0, self.maze.goal)]
+        while pq:
+            cost, n = heapq.heappop(pq)
+            if cost > d.get(n, float('inf')) + 1e-12:
+                continue
+            for nb in self.maze.neighbours(n):
+                nc = cost + self.maze.edge_cost(n, nb)
+                if nc < d.get(nb, float('inf')) - 1e-12:
+                    d[nb] = nc
+                    heapq.heappush(pq, (nc, nb))
+        return d
+
+    def _hop_field(self):
+        """Fewest cells to the goal. Display only - never used for scoring."""
         d = {self.maze.goal: 0}
         q = deque([self.maze.goal])
         while q:
@@ -250,30 +293,36 @@ class MazeManager(Node):
             return
 
         cell = self.maze.world_to_cell(*self.pos)
-        d = self.field.get(cell, self.d_start)
-        pct = 100.0 * (1.0 - d / max(self.d_start, 1))
+        d = self.field.get(cell, self.d_start)              # cost to goal
+        hops = self.hops.get(cell, self.hop_start)          # cells to goal
+        pct = 100.0 * (1.0 - d / max(self.d_start, 1e-6))
 
         if t - self.last_report > 0.5:
             self.last_report = t
-            self.write_state(progress=pct, cells_to_goal=d, cell=cell,
+            self.write_state(progress=pct, cells_to_goal=hops,
+                             cost_to_goal=round(d, 1), cell=cell,
                              elapsed=t - (self.t_started or t))
         if t - self.last_log > 5.0:
             self.last_log = t
-            self.get_logger().info('progress %3.0f%%   %d cells to goal   at %s'
-                                   % (pct, d, cell))
+            self.get_logger().info(
+                'progress %3.0f%%   %d cells / %.0f cell-times to goal   at %s'
+                % (pct, hops, d, cell))
 
         # 'stuck' is no reduction in CELLS to the goal. A car shuffling about
         # inside one cell is not making progress no matter how far it drives,
         # and a car reversing out of a dead end is - it is on its way to a
         # lower number. Metres travelled cannot tell those apart.
-        if self.best_d is None or d < self.best_d:
+        # 'stuck' is no reduction in COST to the goal. A car detouring around
+        # mud is making progress even though it is getting further away in
+        # cells; a car shuffling inside one cell is not, however far it drives.
+        if self.best_d is None or d < self.best_d - 1e-9:
             self.best_d = d
             self.last_progress_t = t
         elif self.last_progress_t and (t - self.last_progress_t) > self.stuck_t:
             self.finish('stuck', t)
 
-    def write_state(self, progress=None, cells_to_goal=None, cell=None,
-                    elapsed=None):
+    def write_state(self, progress=None, cells_to_goal=None, cost_to_goal=None,
+                    cell=None, elapsed=None):
         """Drop the ego's state where the control panel can read it.
 
         The panel is a plain http.server rather than a ROS node, so it picks
@@ -285,6 +334,7 @@ class MazeManager(Node):
                     'y': self.pos[1] if self.pos else None,
                     'yaw': self.yaw, 'active': self.active,
                     'progress': progress, 'cells_to_goal': cells_to_goal,
+                    'cost_to_goal': cost_to_goal,
                     'cell': list(cell) if cell else None,
                     'elapsed': round(elapsed, 1) if elapsed else None,
                     'goal_n': self.n_goal, 'wall_n': self.n_wall,

@@ -335,6 +335,8 @@ async function poll() {
     $('#result').innerHTML = '<div class="stats">' + [
       ['progress', (st.progress === null ? '—' : st.progress + '%')],
       ['cells to goal', e.cells_to_goal === undefined ? '—' : e.cells_to_goal],
+      ['cost to goal', e.cost_to_goal === undefined || e.cost_to_goal === null
+                        ? '—' : e.cost_to_goal],
       ['elapsed', (e.elapsed || 0) + ' s'],
       ['plans run', p.replans || 0],
       ['nodes expanded', p.total_expanded || p.n_expanded || 0],
