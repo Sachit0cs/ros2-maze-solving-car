@@ -1,0 +1,4 @@
+# This package is built and run inside WSL; CRLF would break the shell scripts
+# and the ROS entry points. Keep everything LF in the working tree too.
+* text=auto eol=lf
+*.bat text eol=crlf
