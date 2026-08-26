@@ -494,10 +494,21 @@ maze_solver/
 | `/episode/event` | String | `goal` / `wall` / `stuck` |
 | `/cmd_vel` | Twist | the driver |
 
-## Seven bring-up bugs, and what they teach
+## Twelve bring-up bugs, and what they teach
 
 Each of these produced plausible-looking behaviour while being completely
-wrong, and each took measurement rather than reasoning to find.
+wrong, and each took measurement rather than reasoning to find. Four of them
+were **the referee or the test being wrong**, not the robot — which is its own
+lesson, and the one that cost the most time.
+
+They fall into four groups:
+
+| | |
+|---|---|
+| physics that nobody commanded | 1, 12 |
+| two clocks and two ROS graphs | 2, 3, 4, 11 |
+| a control law with a missing case | 6, 10 |
+| the measurement was wrong, not the thing measured | 5, 7, 8, 9 |
 
 **1. The car slid away from the start line.** Spawned at `z = 0.06`, but
 `base_footprint` is *defined* to sit at ground contact, so it was dropped 55 mm
@@ -542,15 +553,43 @@ up to 2.2 rad/s, fused with a pose up to a frame old; 30 ms at 2 rad/s is 3.4°,
 which at a 5 m sight line puts the return 0.30 m sideways, most of the way to
 the next lattice line. Measured result: **the car reached (3, 1) of a 15×15
 maze, concluded it was walled in on all four sides, and A\* expanded three
-nodes and reported no path** until the episode timed out. Now each edge keeps a
-score — +1 for a hit, −1 for a ray passing through — commits at ±2 and clamps
-at ±6, so a belief is revisable. Scans taken while spinning faster than
-0.6 rad/s are discarded outright, because a correlated error is the kind an
-evidence filter is worst at rejecting.
+nodes and reported no path** until the episode timed out.
 
-*The offline test could not see it because the offline test had no lag.* Same
-lesson as `traffic_dodger`'s bug 2: a test that cannot observe the axis the
-error is on will pass throughout.
+It took **four** guards, found in that order, and each of the first three
+looked complete until it was measured:
+
+- **Evidence, not assertion.** Each edge keeps a score — +1 for a hit, −1 for a
+  ray passing through — committing at ±2 and clamping at ±6, so a belief stays
+  revisable. Not enough on its own.
+- **One vote per edge per *scan*.** The counter voted per *ray*, which defeated
+  it entirely: errors inside a scan are **correlated**, because the pose is one
+  pose, so twenty adjacent rays land on the same wrong edge together. +20 from
+  one bad instant, past the threshold, into the clamp, effectively permanent.
+  The car sealed itself into a **40-cell pocket** of `classic`. Counting once
+  per scan makes "two votes" mean two independent looks — and a single scan now
+  deliberately commits nothing at all.
+- **Reject grazing returns.** A bearing error displaces a return *perpendicular
+  to its ray*, so a ray striking a wall square-on slides **along** it and stays
+  on the same lattice line, while a grazing ray slides **across** lines.
+  Grazing observations are discarded in both passes.
+- **Reject crossings near a corner post.** A ray that should have stopped
+  against a post clips past its tip instead and reports the passage beyond it
+  open. A crossing must be at least a quarter of a cell from either post.
+
+Scans taken while spinning faster than 0.35 rad/s are discarded outright too.
+
+*The offline test could not see any of it, because the offline test fused every
+scan with the exact pose it was taken from.* Same lesson as `traffic_dodger`'s
+bug 2: a test that cannot observe the axis the error is on will pass
+throughout. `test_discovery.py` now **injects the lag** — each scan is
+integrated against a pose wrong by up to 4° — and asserts both properties
+against the truth anyway, so the failure reproduces in two seconds instead of
+in a four-minute simulator run.
+
+The range and incidence gates were originally parameters of the mapper *node*,
+which meant the offline test called `integrate()` directly and never exercised
+them. They now live in `Knowledge.integrate`, so **the thing under test is the
+thing that ships.**
 
 **6. The driver deadlocked whenever it was blocked.** Nosing into a wall while
 pointed at the next waypoint means `alpha` is near zero, so the centring term
@@ -574,9 +613,62 @@ lived in its *active* branch, which is unreachable when the cause is that no
 pose ever arrived — no pose means never active means the warning never prints.
 **A diagnostic that cannot fire in the case it describes is worse than none,
 because its absence reads as reassurance.** And `test_sim.sh` now waits for an
-actual *message* on `/scan` and `/ego/true_odom` rather than for the topics to
-exist, because the bridge creates its topics whether or not anything is
-publishing on the Gazebo side.
+actual *message* on `/clock`, `/scan` and `/ego/true_odom` rather than for the
+topics to exist, because the bridge creates its topics whether or not anything
+is publishing on the Gazebo side.
+
+**8. Progress was measured in cells, so a correct detour read as a retreat.**
+The episode manager flooded the maze breadth-first and called an episode stuck
+when hops-to-goal stopped improving — which quietly assumes shortest is best,
+the assumption this whole project exists to refute. UCS on `terrain` returns an
+80-cell route that avoids the mud in preference to the 66-cell route through
+it. The car drove it perfectly, and its hops read `66, 64, 62, 61, 58,` then
+`60, 61, 62`. **A flawless run was scored "stuck" at 45.8 s.** The field is now
+a Dijkstra over *cost*, which a cost-optimal route reduces by exactly the cost
+of every step.
+
+**9. And then it punished exploration.** Cost-to-goal fixed the detour and
+broke discovery mode, where the car spends most of its time deliberately
+driving *away* from the goal. A run that had mapped 30 % of a 15×15 over 26
+replans and driven from (0, 0) to (0, 14) read `46 %, 41 %, 37 %, 32 %` and was
+scored stuck — for doing exactly what the mode exists to demonstrate. Progress
+is now **either** getting cheaper **or** entering a cell not visited this
+episode. Either resets the clock; neither for 30 s is genuinely stuck. Both
+halves are needed: the first alone fails discovery, and the second alone never
+fires on a wall follower circling a loop forever, which has to stay catchable.
+
+**10. The wall follower had a missing case, not a tuning problem.** The rule is
+normally written with three: blocked, opening, following. Between *noticing* an
+opening and being far enough forward to *turn into* it, the corner post is
+still there — and with no case for that interval, control falls through to
+"following", whose proportional term sees a large side reading, saturates, and
+commands nearly a radian per second straight into the post. Replaying the
+control law against the true geometry offline crashed at **t = 2.2 s in cell
+(1, 0) on every maze tried**; in Gazebo, at 2.8 s. There are four cases now,
+and the offline replay is how it was found in seconds rather than in
+four-minute simulator runs.
+
+**11. A node whose clock never advances says nothing at all.** With
+`use_sim_time`, every timer runs on sim time. If `/clock` never reaches the
+node, sim time stays at zero, no timer fires, and it sits in perfect silence —
+no error, no warning, no output. Measured: a run that logged its startup banner
+and then not one further line for 500 s, reporting only "nothing finished".
+Every diagnostic in the node was itself on sim time, so **every diagnostic was
+stopped by the thing it existed to report.** There is now a watchdog on the
+*system* clock, deliberately a different clock from everything else in the
+node, which compares the two every 5 s and says so loudly.
+
+**12. The driver had no notion of side clearance.** It looked only ahead. A
+160 × 110 mm chassis sweeps a 97 mm radius turning on the spot, which in a
+620 mm corridor leaves 213 mm if it is perfectly centred and much less if it is
+not — so spinning while pressed toward one wall walks a corner into it.
+Measured: a discovery run drove well for fifteen replans, mapped 13 % of
+`classic`, reached (6, 4), and was scored "wall" at 48.3 s while manoeuvring.
+Not a planning failure and not a mapping failure — it simply had nowhere to put
+its corner. It now checks for room before spinning, and pushes away from a side
+that is genuinely close. Note this uses the side *minimum* where the centring
+term uses the *mean*: "how far is the wall on my left" should ignore one ray
+clipping a corner post, and "am I about to hit something" must not.
 
 ## Limitations
 
