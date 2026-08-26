@@ -100,6 +100,7 @@ class PathDriver(Node):
         # it needs beside it before spinning is safe.
         self.declare_parameter('corner_radius', 0.097)
         self.declare_parameter('side_margin', 0.055)
+        self.declare_parameter('max_evade_ticks', 30)   # 1.5 s at 20 Hz
 
         g = self.get_parameter
         meta_path = g('meta_path').value
@@ -118,6 +119,7 @@ class PathDriver(Node):
         self.reverse_clearance = float(g('reverse_clearance').value)
         self.corner_radius = float(g('corner_radius').value)
         self.side_margin = float(g('side_margin').value)
+        self.max_evade_ticks = int(g('max_evade_ticks').value)
 
         if not meta_path or not os.path.exists(meta_path):
             raise SystemExit('path_driver needs meta_path=<maze>.json')
@@ -146,6 +148,7 @@ class PathDriver(Node):
         self.active = False
         self.last_cell = None
         self.hold_ticks = 0
+        self.evade_ticks = 0
         self.get_logger().info('path_driver up: v_max %.2f m/s, lookahead %.2f m'
                                % (self.v_max, self.lookahead))
 
@@ -235,10 +238,18 @@ class PathDriver(Node):
         # question, so it is the minimum and not the mean - unlike the centring
         # term above, which wants the mean precisely because one ray clipping a
         # corner post should not kick the steering.
+        # +/- 0.45 rad, so the wedge spans 64 to 116 degrees: genuinely
+        # LATERAL. The first version used +/- 1.0 rad, which reaches to 33
+        # degrees off the nose and therefore sees the wall the car is driving
+        # TOWARD. Approaching any corner then read as 'no room beside me', the
+        # guard below reversed instead of turning, reversing kept the same wall
+        # in the wedge, and the car sat at (4, 3) of maze_classic for the whole
+        # stuck timeout - silently, because reversing logs nothing and the
+        # blocked branch was never reached.
         near_l = near_r = None
         if rs:
-            near_l = sector_min(rs, angs, math.pi / 2.0, 1.0)
-            near_r = sector_min(rs, angs, -math.pi / 2.0, 1.0)
+            near_l = sector_min(rs, angs, math.pi / 2.0, 0.45)
+            near_r = sector_min(rs, angs, -math.pi / 2.0, 0.45)
 
         cmd = Twist()
         if abs(alpha) > self.gate:
@@ -253,16 +264,20 @@ class PathDriver(Node):
             #
             # So if one side is tight, ease away from it before turning.
             room = self.corner_radius + self.side_margin
-            if near_l is not None and near_l < room and near_r > near_l:
+            tight = (near_l is not None and min(near_l, near_r) < room
+                     and self.evade_ticks < self.max_evade_ticks)
+            if tight:
+                # ease away from the closer side before turning
+                self.evade_ticks += 1
                 cmd.linear.x = -self.v_reverse * 0.5
-                cmd.angular.z = -1.0
+                cmd.angular.z = -1.0 if near_l < near_r else 1.0
                 self.pub_cmd.publish(cmd)
                 return
-            if near_r is not None and near_r < room and near_l > near_r:
-                cmd.linear.x = -self.v_reverse * 0.5
-                cmd.angular.z = 1.0
-                self.pub_cmd.publish(cmd)
-                return
+            # Capped, and the cap matters. Backing away can leave the same wall
+            # in the wedge, so an uncapped evasion is a car that reverses for
+            # ever without logging anything. After max_evade_ticks it turns
+            # regardless and lets the episode manager judge the result.
+            self.evade_ticks = 0
             cmd.angular.z = max(-self.w_max, min(self.w_max, 3.0 * alpha))
             cmd.linear.x = 0.0
         else:

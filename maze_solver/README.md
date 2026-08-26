@@ -401,7 +401,19 @@ cd ~/maze_solver_ws/src/maze_solver
 source scripts/env.sh          # ROS, the workspace, and ROS_DOMAIN_ID=42
 ```
 
-`scripts/env.sh` is not optional — see the domain-collision bug below.
+`scripts/env.sh` is not optional. It sets **two** isolating variables and you
+need both:
+
+```bash
+export ROS_DOMAIN_ID=42        # keeps other projects' ROS nodes out
+export GZ_PARTITION=maze_solver # keeps other projects' GAZEBO off this bus
+```
+
+`ROS_DOMAIN_ID` isolates the ROS 2 graph and does nothing to Gazebo's own
+transport, which is a separate bus that publishes `/clock` ungated by world
+name. Without the partition, a `gz` server started by another project's control
+panel puts a second clock on the same bus and this project's sim time runs
+*backwards*. See the bug list.
 
 ```bash
 # 1. generate the teaching set
