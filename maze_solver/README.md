@@ -86,6 +86,7 @@ maze, headless, scored by the episode manager:
 | `tiny` 6×6 | A\* | known | 20.4 s | **21.4 s** | solved |
 | `classic` 15×15 | A\* | known | 116 s | **121.6 s** | solved |
 | `terrain` 15×15 | UCS | known | 204 s | **196.0 s** | solved |
+| `trap` 15×15 | wall-follower | — | never | **never** | as designed |
 
 "Predicted" is `cost × pitch / v_max` — the planner's own number, computed
 before the car moved. **The cost model is not a scoring convention, it is a
@@ -95,6 +96,16 @@ distance disagree it lands within 4 %.
 That is also why the `terrain` row is the interesting one. UCS chose the
 80-cell route over the 66-cell route, and the 80-cell route really was faster
 on the stopwatch.
+
+The `trap` row is a **pass**, not a failure. The goal there is in the interior
+of a braided maze, so the left-hand rule circles the outer wall forever and the
+episode manager scores it "stuck" — which is precisely the behaviour the maze
+exists to produce, and what `scripts/test_search.py` asserts on 60 mazes.
+`test_sim.sh` knows to expect it; a harness that scored it as a failure would
+be asserting the opposite of the lesson.
+
+Note the wall follower is also *slow* where it does work: on `classic` it walks
+124 cells against A\*'s 68, so it needs well over 500 s where A\* takes 122.
 
 ### The one maze that separates them
 

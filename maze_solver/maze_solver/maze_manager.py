@@ -38,11 +38,13 @@ import json
 import math
 import os
 import subprocess
+import time
 from collections import deque
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -101,6 +103,22 @@ class MazeManager(Node):
         self.create_subscription(Odometry, 'ego/true_odom', self.on_odom, 10)
         self.create_subscription(LaserScan, 'scan', self.on_scan, SENSOR_QOS)
         self.create_timer(0.2, self.tick)
+        # A WALL-CLOCK watchdog, deliberately on a different clock from
+        # everything else in this node.
+        #
+        # Every other timer here runs on SIM time, because use_sim_time is on.
+        # If /clock never reaches this node - a QoS mismatch, a discovery race,
+        # a bridge that came up wrong - then sim time stays at zero, tick()
+        # never fires, and the node sits in total silence producing no output
+        # and no error. Measured: a wall-follower run that logged its startup
+        # banner and then nothing whatsoever for 500 s, and reported only
+        # 'nothing finished'.
+        #
+        # A watchdog on sim time could not catch that; it would be stopped by
+        # the same thing it is meant to report. This one is on the system
+        # clock, so it always fires.
+        self.create_timer(5.0, self.watchdog,
+                          clock=Clock(clock_type=ClockType.SYSTEM_TIME))
 
         self.pos = None
         self.yaw = 0.0
@@ -117,6 +135,8 @@ class MazeManager(Node):
         self.last_report = 0.0
         self.last_log = 0.0
         self.finish_times = []
+        self.wd_last = None
+        self.wd_stalls = 0
 
         self.get_logger().info(
             'maze_manager: %dx%d maze, start %s -> goal %s, %d cells and '
@@ -124,6 +144,22 @@ class MazeManager(Node):
             % (self.maze.cols, self.maze.rows, self.maze.start, self.maze.goal,
                self.hop_start, self.d_start))
         self.respawn('init')
+
+    def watchdog(self):
+        """Is the simulation clock actually reaching this node?"""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        wall = time.monotonic()
+        if self.wd_last is not None:
+            sim_moved = now - self.wd_last[0]
+            wall_moved = wall - self.wd_last[1]
+            if wall_moved > 1.0 and sim_moved < 0.05:
+                self.wd_stalls += 1
+                self.get_logger().error(
+                    'SIM CLOCK IS NOT ADVANCING (%.1f s of wall time, %.3f s of '
+                    'sim time). Nothing in this node will run. Check that '
+                    '/clock is bridged and that every node is on the same '
+                    'ROS_DOMAIN_ID - see scripts/env.sh.' % (wall_moved, sim_moved))
+        self.wd_last = (now, wall)
 
     def _distance_field(self):
         """Least COST from every cell to the goal. One Dijkstra, at startup.

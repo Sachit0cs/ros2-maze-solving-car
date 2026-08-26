@@ -21,6 +21,12 @@ MAZE=${1:-classic}
 ALGO=${2:-astar}
 MODE=${3:-known}
 BUDGET=${4:-180}
+# What COUNTS as success for this combination. Almost always 'goal' - but not
+# on maze_trap with the wall follower, where the documented, intended and
+# tested outcome is that it never finds the goal at all. A harness that scored
+# that as a failure would be asserting the opposite of the lesson.
+EXPECT=${5:-goal}
+if [ "$MAZE" = "trap" ] && [ "$ALGO" = "wall" ]; then EXPECT=stuck; fi
 
 MAZES=~/maze_solver_ws/mazes
 WORLD=$MAZES/maze_$MAZE.sdf
@@ -78,7 +84,7 @@ echo "  bridged: $N/3 core topics"
 # for a pose on /ego/true_odom that never came, while the topic sat there
 # looking fine. So wait for an actual MESSAGE on each, and fail immediately and
 # specifically if one never arrives.
-for T in /scan /ego/true_odom; do
+for T in /clock /scan /ego/true_odom; do
   if timeout 25 ros2 topic echo --once "$T" >/dev/null 2>&1; then
     echo "  $T is publishing"
   else
@@ -148,6 +154,13 @@ grep -hE 'planner up|mapper up|path_driver up|wall_follower up|maze_manager:|ast
 
 echo
 echo "=== result ==="
+if [ "$RESULT" = "$EXPECT" ] && [ "$EXPECT" != "goal" ]; then
+  echo "  PASS - maze_$MAZE with $ALGO ended as '$EXPECT', which is the"
+  echo "         documented behaviour: the left-hand rule cannot reach a goal"
+  echo "         in the interior of a braided maze. See search.py's"
+  echo "         wall_follower docstring for the measured table."
+  exit 0
+fi
 case "$RESULT" in
   goal)
     echo "  PASS - solved maze_$MAZE with $ALGO in $MODE mode"
